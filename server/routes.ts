@@ -18,23 +18,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // --- Championships ---
 
+  // Returns championships sorted by their stable position field
   app.get("/api/championships", async (req, res) => {
     try {
       const champs = await storage.getAllChampionships();
       res.json(champs);
     } catch {
       res.status(500).json({ error: "Failed to fetch championships" });
-    }
-  });
-
-  app.post("/api/championships", async (req, res) => {
-    try {
-      const validated = insertChampionshipSchema.parse(req.body);
-      const champ = await storage.createChampionship(validated);
-      res.status(201).json(champ);
-    } catch (error: any) {
-      if (error.name === 'ZodError') return res.status(400).json({ error: "Invalid data", details: error.errors });
-      res.status(500).json({ error: "Failed to create championship" });
     }
   });
 
@@ -45,11 +35,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!champ) return res.status(404).json({ error: "Championship not found" });
       res.json(champ);
     } catch (error: any) {
-      if (error.name === 'ZodError') return res.status(400).json({ error: "Invalid data" });
+      if (error.name === "ZodError") return res.status(400).json({ error: "Invalid data" });
       res.status(500).json({ error: "Failed to update championship" });
     }
   });
 
+  // Reset a league: deletes its matches only — Elo is never affected
   app.post("/api/championships/:id/reset", async (req, res) => {
     try {
       const champ = await storage.getChampionship(req.params.id);
@@ -61,27 +52,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // --- Players ---
+  // --- Players (global — not per championship) ---
 
-  app.get("/api/championships/:id/players", async (req, res) => {
+  app.get("/api/players", async (req, res) => {
     try {
-      const players = await storage.getPlayersByChampionship(req.params.id);
-      res.json(players);
+      const allPlayers = await storage.getAllPlayers();
+      res.json(allPlayers);
     } catch {
       res.status(500).json({ error: "Failed to fetch players" });
     }
   });
 
-  app.post("/api/championships/:id/players", async (req, res) => {
+  app.post("/api/players", async (req, res) => {
     try {
-      const validated = insertPlayerSchema.parse({
-        ...req.body,
-        championshipId: req.params.id,
-      });
+      const validated = insertPlayerSchema.parse(req.body);
       const player = await storage.createPlayer(validated);
       res.status(201).json(player);
     } catch (error: any) {
-      if (error.name === 'ZodError') return res.status(400).json({ error: "Invalid player data", details: error.errors });
+      if (error.name === "ZodError") return res.status(400).json({ error: "Invalid player data", details: error.errors });
       res.status(500).json({ error: "Failed to create player" });
     }
   });
@@ -93,7 +81,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!player) return res.status(404).json({ error: "Player not found" });
       res.json(player);
     } catch (error: any) {
-      if (error.name === 'ZodError') return res.status(400).json({ error: "Invalid data" });
+      if (error.name === "ZodError") return res.status(400).json({ error: "Invalid data" });
       res.status(500).json({ error: "Failed to update player" });
     }
   });
@@ -108,12 +96,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // --- Matches ---
+  // Reset a single player's Elo to 1200 — only exposed in the main Classement Elo tab
+  app.post("/api/players/:id/reset-elo", async (req, res) => {
+    try {
+      const player = await storage.resetPlayerElo(req.params.id);
+      if (!player) return res.status(404).json({ error: "Player not found" });
+      res.json(player);
+    } catch {
+      res.status(500).json({ error: "Failed to reset player Elo" });
+    }
+  });
+
+  // --- Matches (per championship/league) ---
 
   app.get("/api/championships/:id/matches", async (req, res) => {
     try {
-      const matches = await storage.getMatchesByChampionship(req.params.id);
-      res.json(matches);
+      const leagueMatches = await storage.getMatchesByChampionship(req.params.id);
+      res.json(leagueMatches);
     } catch {
       res.status(500).json({ error: "Failed to fetch matches" });
     }
@@ -136,7 +135,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ error: "A player cannot play against themselves" });
       }
 
-      const resultScore = validated.result === 'white' ? 1 : validated.result === 'black' ? 0 : 0.5;
+      // FIDE Elo calculation
+      const resultScore = validated.result === "white" ? 1 : validated.result === "black" ? 0 : 0.5;
       const whiteExpected = expectedScore(whitePlayer.elo, blackPlayer.elo);
       const blackExpected = 1 - whiteExpected;
       const whiteK = getKFactor(whitePlayer.gamesPlayed, whitePlayer.elo);
@@ -160,16 +160,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
         timestamp: new Date(),
       });
 
-      await storage.updatePlayer(whitePlayer.id, { elo: whiteEloAfter, gamesPlayed: whitePlayer.gamesPlayed + 1 });
-      await storage.updatePlayer(blackPlayer.id, { elo: blackEloAfter, gamesPlayed: blackPlayer.gamesPlayed + 1 });
+      // Update both players' global Elo
+      await storage.updatePlayer(whitePlayer.id, {
+        elo: whiteEloAfter,
+        gamesPlayed: whitePlayer.gamesPlayed + 1,
+      });
+      await storage.updatePlayer(blackPlayer.id, {
+        elo: blackEloAfter,
+        gamesPlayed: blackPlayer.gamesPlayed + 1,
+      });
 
       res.status(201).json(match);
     } catch (error: any) {
-      if (error.name === 'ZodError') return res.status(400).json({ error: "Invalid match data", details: error.errors });
+      if (error.name === "ZodError") return res.status(400).json({ error: "Invalid match data", details: error.errors });
       res.status(500).json({ error: "Failed to create match" });
     }
   });
 
+  // Delete a match and revert Elo (both players restored to before values)
   app.delete("/api/matches/:id", async (req, res) => {
     try {
       const deleted = await storage.deleteMatch(req.params.id);

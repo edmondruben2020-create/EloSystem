@@ -3,19 +3,26 @@ import { pgTable, text, varchar, integer, real, timestamp } from "drizzle-orm/pg
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
+// Championships: each has a stable position for consistent tab ordering
+// eloMin = null → championship (manual enrollment, points 1/0.5/0)
+// eloMin = number → league (players auto-filtered by Elo, points 2/1/0)
 export const championships = pgTable("championships", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   name: text("name").notNull(),
+  position: integer("position").notNull().default(0),
+  eloMin: integer("elo_min"),
 });
 
+// Players are GLOBAL — not tied to any championship
+// Their Elo is updated by every match regardless of which league it's in
 export const players = pgTable("players", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   name: text("name").notNull(),
   elo: real("elo").notNull().default(1200),
   gamesPlayed: integer("games_played").notNull().default(0),
-  championshipId: varchar("championship_id").notNull().references(() => championships.id),
 });
 
+// Matches belong to a specific championship/league
 export const matches = pgTable("matches", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   championshipId: varchar("championship_id").notNull().references(() => championships.id),
@@ -33,6 +40,7 @@ export const matches = pgTable("matches", {
 
 export const insertChampionshipSchema = createInsertSchema(championships).omit({ id: true });
 
+// Players no longer have a championshipId
 export const insertPlayerSchema = createInsertSchema(players).omit({
   id: true,
   gamesPlayed: true,

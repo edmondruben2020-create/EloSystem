@@ -1,4 +1,4 @@
-import { eq, desc } from "drizzle-orm";
+import { eq, desc, asc } from "drizzle-orm";
 import { db } from "./db";
 import {
   championships,
@@ -17,27 +17,30 @@ export interface IStorage {
   getChampionship(id: string): Promise<Championship | undefined>;
   createChampionship(data: InsertChampionship): Promise<Championship>;
   updateChampionship(id: string, name: string): Promise<Championship | undefined>;
+  // Reset a league: deletes matches only — Elo is NOT touched
   resetChampionship(id: string): Promise<void>;
 
-  // Players
-  getPlayersByChampionship(championshipId: string): Promise<Player[]>;
+  // Players (global — not per championship)
+  getAllPlayers(): Promise<Player[]>;
   getPlayer(id: string): Promise<Player | undefined>;
   createPlayer(player: InsertPlayer): Promise<Player>;
   updatePlayer(id: string, updates: Partial<Player>): Promise<Player | undefined>;
   deletePlayer(id: string): Promise<boolean>;
+  resetPlayerElo(id: string): Promise<Player | undefined>; // only from main tab
 
-  // Matches
+  // Matches (per championship/league)
   getMatchesByChampionship(championshipId: string): Promise<Match[]>;
   getMatch(id: string): Promise<Match | undefined>;
   createMatch(match: Omit<Match, "id">): Promise<Match>;
-  deleteMatch(id: string): Promise<boolean>;
+  deleteMatch(id: string): Promise<boolean>; // reverts Elo
 }
 
 export class DatabaseStorage implements IStorage {
   // ---- Championships ----
 
+  // Returns championships ordered by their stable position field
   async getAllChampionships(): Promise<Championship[]> {
-    return db.select().from(championships);
+    return db.select().from(championships).orderBy(asc(championships.position));
   }
 
   async getChampionship(id: string): Promise<Championship | undefined> {
@@ -59,23 +62,15 @@ export class DatabaseStorage implements IStorage {
     return updated;
   }
 
+  // Reset a league: ONLY deletes its matches — Elo stays intact
   async resetChampionship(id: string): Promise<void> {
-    // Delete all matches for this championship
     await db.delete(matches).where(eq(matches.championshipId, id));
-    // Reset all players' Elo and gamesPlayed to initial values
-    await db
-      .update(players)
-      .set({ elo: 1200, gamesPlayed: 0 })
-      .where(eq(players.championshipId, id));
   }
 
-  // ---- Players ----
+  // ---- Players (global) ----
 
-  async getPlayersByChampionship(championshipId: string): Promise<Player[]> {
-    return db
-      .select()
-      .from(players)
-      .where(eq(players.championshipId, championshipId));
+  async getAllPlayers(): Promise<Player[]> {
+    return db.select().from(players);
   }
 
   async getPlayer(id: string): Promise<Player | undefined> {
@@ -105,7 +100,18 @@ export class DatabaseStorage implements IStorage {
     return (result.rowCount ?? 0) > 0;
   }
 
-  // ---- Matches ----
+  // Resets a player's Elo to 1200 and gamesPlayed to 0
+  // This endpoint is only exposed in the main Classement Elo tab
+  async resetPlayerElo(id: string): Promise<Player | undefined> {
+    const [updated] = await db
+      .update(players)
+      .set({ elo: 1200, gamesPlayed: 0 })
+      .where(eq(players.id, id))
+      .returning();
+    return updated;
+  }
+
+  // ---- Matches (per championship/league) ----
 
   async getMatchesByChampionship(championshipId: string): Promise<Match[]> {
     return db
@@ -125,11 +131,11 @@ export class DatabaseStorage implements IStorage {
     return match;
   }
 
+  // Delete a match and revert both players' Elo to their before values
   async deleteMatch(id: string): Promise<boolean> {
     const match = await this.getMatch(id);
     if (!match) return false;
 
-    // Revert Elo for both players
     const [whitePlayer, blackPlayer] = await Promise.all([
       this.getPlayer(match.whitePlayerId),
       this.getPlayer(match.blackPlayerId),
@@ -155,8 +161,7 @@ export class DatabaseStorage implements IStorage {
 
 export const storage = new DatabaseStorage();
 
-// ---- Seed default championships if none exist ----
-// Called once at server startup to ensure the 5 championships are always present.
+// Seed 5 default championships if none exist (runs once at server startup)
 export async function seedDefaultChampionships() {
   const existing = await storage.getAllChampionships();
   if (existing.length === 0) {
@@ -167,8 +172,8 @@ export async function seedDefaultChampionships() {
       "Championnat 4",
       "Championnat 5",
     ];
-    for (const name of defaultNames) {
-      await storage.createChampionship({ name });
+    for (let i = 0; i < defaultNames.length; i++) {
+      await storage.createChampionship({ name: defaultNames[i], position: i });
     }
   }
 }
