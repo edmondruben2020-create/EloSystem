@@ -17,7 +17,7 @@ export interface IStorage {
   getChampionship(id: string): Promise<Championship | undefined>;
   createChampionship(data: InsertChampionship): Promise<Championship>;
   updateChampionship(id: string, name: string): Promise<Championship | undefined>;
-  // Reset a league: deletes matches only — Elo is NOT touched
+  deleteChampionship(id: string): Promise<void>;
   resetChampionship(id: string): Promise<void>;
 
   // Players (global — not per championship)
@@ -26,19 +26,28 @@ export interface IStorage {
   createPlayer(player: InsertPlayer): Promise<Player>;
   updatePlayer(id: string, updates: Partial<Player>): Promise<Player | undefined>;
   deletePlayer(id: string): Promise<boolean>;
-  resetPlayerElo(id: string): Promise<Player | undefined>; // only from main tab
+  resetPlayerElo(id: string): Promise<Player | undefined>;
 
   // Matches (per championship/league)
   getMatchesByChampionship(championshipId: string): Promise<Match[]>;
   getMatch(id: string): Promise<Match | undefined>;
-  createMatch(match: Omit<Match, "id">): Promise<Match>;
-  deleteMatch(id: string): Promise<boolean>; // reverts Elo
+  /**
+   * Records a match AND updates both players' Elo atomically inside a DB transaction.
+   * If any step fails, the whole operation is rolled back — no partial state possible.
+   */
+  recordMatchTransaction(
+    matchData: Omit<Match, "id">,
+    whiteNewElo: number,
+    whiteNewGames: number,
+    blackNewElo: number,
+    blackNewGames: number,
+  ): Promise<Match>;
+  deleteMatch(id: string): Promise<boolean>;
 }
 
 export class DatabaseStorage implements IStorage {
-  // ---- Championships ----
+  // ── Championships ─────────────────────────────────────────────────────────
 
-  // Returns championships ordered by their stable position field
   async getAllChampionships(): Promise<Championship[]> {
     return db.select().from(championships).orderBy(asc(championships.position));
   }
@@ -62,12 +71,18 @@ export class DatabaseStorage implements IStorage {
     return updated;
   }
 
-  // Reset a league: ONLY deletes its matches — Elo stays intact
+  // Deletes a championship AND all its matches (FK cascade-safe)
+  async deleteChampionship(id: string): Promise<void> {
+    await db.delete(matches).where(eq(matches.championshipId, id));
+    await db.delete(championships).where(eq(championships.id, id));
+  }
+
+  // Resets a championship/league: deletes its matches only — Elo stays intact
   async resetChampionship(id: string): Promise<void> {
     await db.delete(matches).where(eq(matches.championshipId, id));
   }
 
-  // ---- Players (global) ----
+  // ── Players (global) ──────────────────────────────────────────────────────
 
   async getAllPlayers(): Promise<Player[]> {
     return db.select().from(players);
@@ -100,8 +115,6 @@ export class DatabaseStorage implements IStorage {
     return (result.rowCount ?? 0) > 0;
   }
 
-  // Resets a player's Elo to 1200 and gamesPlayed to 0
-  // This endpoint is only exposed in the main Classement Elo tab
   async resetPlayerElo(id: string): Promise<Player | undefined> {
     const [updated] = await db
       .update(players)
@@ -111,7 +124,7 @@ export class DatabaseStorage implements IStorage {
     return updated;
   }
 
-  // ---- Matches (per championship/league) ----
+  // ── Matches ───────────────────────────────────────────────────────────────
 
   async getMatchesByChampionship(championshipId: string): Promise<Match[]> {
     return db
@@ -126,12 +139,36 @@ export class DatabaseStorage implements IStorage {
     return match;
   }
 
-  async createMatch(matchData: Omit<Match, "id">): Promise<Match> {
-    const [match] = await db.insert(matches).values(matchData).returning();
-    return match;
+  /**
+   * Atomic match creation: inserts the match record AND updates both players'
+   * Elo inside a single DB transaction. If any step fails the whole thing
+   * rolls back — the server never reaches a partially-updated state.
+   */
+  async recordMatchTransaction(
+    matchData: Omit<Match, "id">,
+    whiteNewElo: number,
+    whiteNewGames: number,
+    blackNewElo: number,
+    blackNewGames: number,
+  ): Promise<Match> {
+    return db.transaction(async (tx) => {
+      const [newMatch] = await tx.insert(matches).values(matchData).returning();
+
+      await tx
+        .update(players)
+        .set({ elo: whiteNewElo, gamesPlayed: whiteNewGames })
+        .where(eq(players.id, matchData.whitePlayerId));
+
+      await tx
+        .update(players)
+        .set({ elo: blackNewElo, gamesPlayed: blackNewGames })
+        .where(eq(players.id, matchData.blackPlayerId));
+
+      return newMatch;
+    });
   }
 
-  // Delete a match and revert both players' Elo to their before values
+  // Deletes a match and reverts both players' Elo to their snapshot values
   async deleteMatch(id: string): Promise<boolean> {
     const match = await this.getMatch(id);
     if (!match) return false;
@@ -161,19 +198,53 @@ export class DatabaseStorage implements IStorage {
 
 export const storage = new DatabaseStorage();
 
-// Seed 5 default championships if none exist (runs once at server startup)
-export async function seedDefaultChampionships() {
-  const existing = await storage.getAllChampionships();
-  if (existing.length === 0) {
-    const defaultNames = [
-      "Championnat 1",
-      "Championnat 2",
-      "Championnat 3",
-      "Championnat 4",
-      "Championnat 5",
-    ];
-    for (let i = 0; i < defaultNames.length; i++) {
-      await storage.createChampionship({ name: defaultNames[i], position: i });
+// ── Seed ──────────────────────────────────────────────────────────────────────
+// Only the two official leagues are seeded automatically.
+// Manual championships are created by admins via the UI and are never touched here.
+const SEED_ENTRIES: InsertChampionship[] = [
+  { key: "ligue-pion", name: "Ligue Pion", position: 0, eloMin: 0   },
+  { key: "ligue-roi",  name: "Ligue Roi",  position: 1, eloMin: 900 },
+];
+
+/**
+ * Fully idempotent seed — safe to run on every server start, 100 times in a row.
+ *
+ * Strategy:
+ *   – Lookup is by `key` (immutable slug), never by name or count.
+ *   – Missing entry  → insert it.
+ *   – Existing entry → repair `eloMin` if a stale seed had left it wrong.
+ *   – Every operation is wrapped so a single failure never aborts the others.
+ */
+export async function seedDefaultChampionships(): Promise<void> {
+  let existing: Championship[];
+  try {
+    existing = await storage.getAllChampionships();
+  } catch (err) {
+    console.error("[Seed] Could not fetch championships, skipping seed:", err);
+    return;
+  }
+
+  const byKey = new Map(existing.filter((c) => c.key).map((c) => [c.key!, c]));
+
+  for (const entry of SEED_ENTRIES) {
+    try {
+      if (!byKey.has(entry.key!)) {
+        await storage.createChampionship(entry);
+        console.log(`[Seed] Created "${entry.name}" (key=${entry.key}, eloMin=${entry.eloMin ?? "null"})`);
+      } else {
+        const row = byKey.get(entry.key!)!;
+        const expectedEloMin = entry.eloMin ?? null;
+        if (row.eloMin !== expectedEloMin) {
+          await db
+            .update(championships)
+            .set({ eloMin: expectedEloMin })
+            .where(eq(championships.key, entry.key!));
+          console.log(`[Seed] Repaired eloMin for "${row.name}" (${row.eloMin} → ${expectedEloMin})`);
+        }
+      }
+    } catch (err) {
+      console.error(`[Seed] Error processing entry key="${entry.key}":`, err);
+      // Continue with the next entry — one failure must not abort the whole seed
     }
   }
 }

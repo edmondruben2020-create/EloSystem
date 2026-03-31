@@ -1,0 +1,53 @@
+🚨 Refonte critique du système de Ligues et Championnats 🚨
+
+Tu es un expert Full-Stack (React + Drizzle ORM). Nous devons corriger un bug majeur de duplication et refondre la logique des tournois. Lis attentivement toutes les étapes avant de coder.
+
+1. Mise à jour du Schéma de Base de données (Drizzle) :
+
+Modifie la table championships (ou équivalent) pour ajouter une distinction claire entre une ligue automatique et un championnat manuel (par exemple, une colonne isLeague: boolean ou type: 'league' | 'tournament').
+
+Assure-toi qu'un joueur est lié à un championnat/ligue sans que son historique de matchs ne soit supprimé s'il change de ligue.
+
+2. Fonction de Seed (Démarrage propre) :
+
+Supprime la création automatique des "Championnat 1, 2, 3, 4, 5".
+
+Le script de seed doit uniquement vérifier et créer (si elles n'existent pas déjà) les deux ligues officielles :
+
+"Ligue Pion" (isLeague: true)
+
+"Ligue Roi" (isLeague: true)
+
+Utilise une vérification (ou ON CONFLICT DO NOTHING) pour éviter tout doublon à chaque redémarrage du serveur.
+
+3. Système de Migration Dynamique des Joueurs (CRUCIAL) :
+
+La Ligue Pion est pour les joueurs de 0 à 899 Elo.
+
+La Ligue Roi est pour les joueurs de 900 Elo et plus.
+
+Lorsqu'un match est enregistré, vérifie le nouvel Elo des joueurs :
+
+Si un joueur "Pion" atteint ou dépasse 900 Elo, met à jour son championship_id pour le passer dans la "Ligue Roi".
+
+Si un joueur "Roi" redescend en dessous de 900 Elo, met à jour son championship_id pour le repasser dans la "Ligue Pion".
+
+Règle d'or : Lors de cette migration, le joueur conserve absolument tout. Ses points accumulés (victoires, nuls, défaites) et son historique de matchs doivent le suivre. Ne recrée pas de profil joueur, modifie juste son assignation de ligue.
+
+4. Interface Utilisateur (Onglets et Bouton de Création) :
+
+L'interface principale doit afficher des onglets fixes pour les vues principales :
+
+Classement Elo (Vue globale de tous les joueurs)
+
+Ligue Pion
+
+Ligue Roi
+
+Nouvelle fonctionnalité : Ajoute un bouton visible (ex: "+ Nouveau Championnat" ou "Créer un Championnat").
+
+Ce bouton ouvre un petit formulaire (nom du championnat) pour créer un championnat manuel (isLeague: false).
+
+Affiche les championnats créés manuellement à la suite des onglets fixes ou dans un menu déroulant pour ne pas surcharger l'écran.
+
+Vérifie bien les imports et assure-toi que l'application compile sans erreur Drizzle avant de valider tes changements.

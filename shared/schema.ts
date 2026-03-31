@@ -3,14 +3,17 @@ import { pgTable, text, varchar, integer, real, timestamp } from "drizzle-orm/pg
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
-// Championships: each has a stable position for consistent tab ordering
-// eloMin = null → championship (manual enrollment, points 1/0.5/0)
+// Championships: each has a stable position for consistent tab ordering.
+// key   = immutable slug (never changes, used for safe upsert seeding).
+//         "ligue-pion" and "ligue-roi" are reserved for the two leagues.
+// eloMin = null  → championship (manual enrollment, points 1/0.5/0)
 // eloMin = number → league (players auto-filtered by Elo, points 2/1/0)
 export const championships = pgTable("championships", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   name: text("name").notNull(),
   position: integer("position").notNull().default(0),
   eloMin: integer("elo_min"),
+  key: text("key").unique(), // stable slug — never rename this column
 });
 
 // Players are GLOBAL — not tied to any championship
