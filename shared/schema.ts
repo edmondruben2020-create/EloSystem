@@ -31,8 +31,8 @@ export const players = pgTable("players", {
 export const matches = pgTable("matches", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   championshipId: varchar("championship_id").notNull().references(() => championships.id),
-  whitePlayerId: varchar("white_player_id").notNull().references(() => players.id),
-  blackPlayerId: varchar("black_player_id").notNull().references(() => players.id),
+  whitePlayerId: varchar("white_player_id").notNull().references(() => players.id, { onDelete: "cascade" }),
+  blackPlayerId: varchar("black_player_id").notNull().references(() => players.id, { onDelete: "cascade" }),
   result: text("result").notNull(),
   whiteEloBefore: real("white_elo_before").notNull(),
   blackEloBefore: real("black_elo_before").notNull(),
