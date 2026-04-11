@@ -34,10 +34,13 @@ import {
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface Championship {
   id: string; name: string; position: number;
-  eloMin: number | null; // null = manual championship; number = auto-league
+  eloMin: number | null; // null = manual championship; number = official league
   key: string | null;    // immutable slug for official entries
 }
-interface Player { id: string; name: string; elo: number; gamesPlayed: number; }
+interface Player {
+  id: string; name: string; elo: number; gamesPlayed: number;
+  leagueKey: string | null; // "ligue-pion" | "ligue-roi" | null = unassigned
+}
 interface Match {
   id: string; championshipId: string;
   whitePlayerId: string; blackPlayerId: string; result: MatchResult;
@@ -50,17 +53,17 @@ const LEAGUE_ROI_KEY  = "ligue-roi";
 
 function getKFactor(g: number, elo: number) { return g < 30 ? 40 : elo >= 2400 ? 10 : 20; }
 
-/** Returns players eligible for a given entry. Leagues filter by Elo range; championships show all. */
-function getEligiblePlayers(entry: Championship, allChampionships: Championship[], allPlayers: Player[]): Player[] {
-  if (entry.eloMin === null) return allPlayers; // manual championship → all players
-  const leagues = [...allChampionships]
-    .filter((c) => c.eloMin !== null)
-    .sort((a, b) => (a.eloMin ?? 0) - (b.eloMin ?? 0));
-  const idx = leagues.findIndex((l) => l.id === entry.id);
-  const min  = entry.eloMin ?? 0;
-  const next = leagues[idx + 1];
-  const max  = next ? (next.eloMin ?? Infinity) : Infinity;
-  return allPlayers.filter((p) => p.elo >= min && p.elo < max);
+/**
+ * Returns the players who belong to a given championship/league.
+ * – Official leagues (eloMin !== null): filtered by the player's permanent leagueKey assignment.
+ * – Manual championships (eloMin === null): all players are eligible.
+ *
+ * League assignment is set manually at creation time and never changes automatically.
+ */
+function getEligiblePlayers(entry: Championship, allPlayers: Player[]): Player[] {
+  if (entry.eloMin === null) return allPlayers;           // manual championship
+  if (!entry.key)             return allPlayers;           // safety fallback
+  return allPlayers.filter((p) => p.leagueKey === entry.key);
 }
 
 // League points: 2/1/0 — for leagues
@@ -238,14 +241,15 @@ function StandingsTable({ players, matches, pointSystem }: {
     const points = pointSystem === "tournament"
       ? calcTournamentPoints(p.id, matches)
       : calcLeaguePoints(p.id, matches);
-    return { ...p, wins, draws, losses, points };
+    const parties = wins + draws + losses;
+    return { ...p, wins, draws, losses, points, parties };
   }).sort((a, b) => b.points - a.points || b.wins - a.wins);
 
   const desc = pointSystem === "tournament"
     ? "Victoire = 1 pt · Nulle = ½ pt · Défaite = 0 pt"
     : "Victoire = 2 pts · Nulle = 1 pt · Défaite = 0 pt";
   const emptyMsg = pointSystem === "tournament"
-    ? "Aucun joueur dans ce championnat." : "Aucun joueur éligible pour cette ligue.";
+    ? "Aucun joueur dans ce championnat." : "Aucun joueur affecté à cette ligue.";
 
   return (
     <div className="space-y-3">
@@ -260,6 +264,7 @@ function StandingsTable({ players, matches, pointSystem }: {
                 <TableHead className="w-14">Rang</TableHead>
                 <TableHead>Joueur</TableHead>
                 <TableHead className="text-right">Elo</TableHead>
+                <TableHead className="text-right">Parties</TableHead>
                 <TableHead className="text-right">V</TableHead>
                 <TableHead className="text-right">N</TableHead>
                 <TableHead className="text-right">D</TableHead>
@@ -277,6 +282,7 @@ function StandingsTable({ players, matches, pointSystem }: {
                   </TableCell>
                   <TableCell className="font-medium">{p.name}</TableCell>
                   <TableCell className="text-right text-muted-foreground">{Math.round(p.elo)}</TableCell>
+                  <TableCell className="text-right text-muted-foreground" data-testid={`text-parties-${p.id}`}>{p.parties}</TableCell>
                   <TableCell className="text-right text-green-600 dark:text-green-400 font-medium">{p.wins}</TableCell>
                   <TableCell className="text-right text-muted-foreground">{p.draws}</TableCell>
                   <TableCell className="text-right text-red-600 dark:text-red-400">{p.losses}</TableCell>
@@ -406,7 +412,7 @@ function ChampionshipPanel({ championship, eligiblePlayers, allPlayers, onDelete
             pointSystem={isLeague ? "league" : "tournament"} />
           {isLeague && eligiblePlayers.length < allPlayers.length && (
             <p className="mt-3 text-xs text-muted-foreground">
-              Seuls les joueurs dont l'Elo est dans la plage de cette ligue sont affichés.
+              Seuls les joueurs affectés à cette ligue sont affichés.
             </p>
           )}
         </TabsContent>
@@ -475,10 +481,13 @@ function ChampionshipPanel({ championship, eligiblePlayers, allPlayers, onDelete
 }
 
 // ── Global Elo Leaderboard ─────────────────────────────────────────────────────
-function EloLeaderboard({ players, onAddPlayer, onEditPlayer, onDeletePlayer, onResetElo }: {
+interface LeagueOption { key: string; name: string; }
+
+function EloLeaderboard({ players, leagues, onAddPlayer, onEditPlayer, onDeletePlayer, onResetElo }: {
   players: Player[];
-  onAddPlayer: (name: string, elo: number) => void;
-  onEditPlayer: (id: string, name: string) => void;
+  leagues: LeagueOption[];
+  onAddPlayer: (name: string, elo: number, leagueKey: string | null) => void;
+  onEditPlayer: (id: string, name: string, leagueKey: string | null) => void;
   onDeletePlayer: (id: string) => void;
   onResetElo: (id: string) => void;
 }) {
@@ -488,6 +497,8 @@ function EloLeaderboard({ players, onAddPlayer, onEditPlayer, onDeletePlayer, on
   const [toEdit, setToEdit]     = useState<Player | null>(null);
 
   const sorted = [...players].sort((a, b) => b.elo - a.elo);
+  const leagueLabel = (key: string | null) =>
+    key ? (leagues.find((l) => l.key === key)?.name ?? key) : "—";
   const rankIcon = (r: number) =>
     r === 1 ? <Trophy className="w-5 h-5 text-yellow-500" /> :
     r === 2 ? <Medal  className="w-5 h-5 text-gray-400"   /> :
@@ -495,7 +506,11 @@ function EloLeaderboard({ players, onAddPlayer, onEditPlayer, onDeletePlayer, on
 
   return (
     <>
-      {isAdmin && <div className="flex gap-2 mb-4"><AddPlayerDialog onAddPlayer={onAddPlayer} /></div>}
+      {isAdmin && (
+        <div className="flex gap-2 mb-4">
+          <AddPlayerDialog onAddPlayer={onAddPlayer} leagues={leagues} />
+        </div>
+      )}
 
       <div className="rounded-md border" data-testid="table-elo-leaderboard">
         <Table>
@@ -505,6 +520,7 @@ function EloLeaderboard({ players, onAddPlayer, onEditPlayer, onDeletePlayer, on
               <TableHead>Joueur</TableHead>
               <TableHead className="text-right">Elo</TableHead>
               <TableHead className="text-right">Parties</TableHead>
+              <TableHead>Ligue</TableHead>
               <TableHead className="text-right">K</TableHead>
               {isAdmin && <TableHead className="w-28"></TableHead>}
             </TableRow>
@@ -512,7 +528,7 @@ function EloLeaderboard({ players, onAddPlayer, onEditPlayer, onDeletePlayer, on
           <TableBody>
             {sorted.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={isAdmin ? 6 : 5} className="text-center py-8 text-muted-foreground">
+                <TableCell colSpan={isAdmin ? 7 : 6} className="text-center py-8 text-muted-foreground">
                   Aucun joueur. Ajoutez votre premier joueur pour commencer.
                 </TableCell>
               </TableRow>
@@ -525,7 +541,12 @@ function EloLeaderboard({ players, onAddPlayer, onEditPlayer, onDeletePlayer, on
                 <TableCell className="text-right">
                   <span className="text-lg font-bold">{Math.round(p.elo)}</span>
                 </TableCell>
-                <TableCell className="text-right">{p.gamesPlayed}</TableCell>
+                <TableCell className="text-right" data-testid={`text-games-${p.id}`}>{p.gamesPlayed}</TableCell>
+                <TableCell>
+                  <span className="text-sm text-muted-foreground" data-testid={`text-league-${p.id}`}>
+                    {leagueLabel(p.leagueKey)}
+                  </span>
+                </TableCell>
                 <TableCell className="text-right">
                   <Badge variant="secondary">K={getKFactor(p.gamesPlayed, p.elo)}</Badge>
                 </TableCell>
@@ -580,8 +601,10 @@ function EloLeaderboard({ players, onAddPlayer, onEditPlayer, onDeletePlayer, on
         </AlertDialogContent>
       </AlertDialog>
 
-      <EditPlayerDialog player={toEdit} open={!!toEdit} onOpenChange={(o) => !o && setToEdit(null)}
-        onSave={(id, name) => onEditPlayer(id, name)} />
+      <EditPlayerDialog
+        player={toEdit} open={!!toEdit} onOpenChange={(o) => !o && setToEdit(null)}
+        leagues={leagues}
+        onSave={(id, name, leagueKey) => onEditPlayer(id, name, leagueKey)} />
     </>
   );
 }
@@ -607,16 +630,23 @@ export default function Home() {
   const liguePion = leagues.find((l) => l.key === LEAGUE_PION_KEY);
   const ligueRoi  = leagues.find((l) => l.key === LEAGUE_ROI_KEY);
 
+  // League options passed to dialogs for manual assignment
+  const leagueOptions: LeagueOption[] = leagues
+    .filter((l) => l.key !== null)
+    .map((l) => ({ key: l.key!, name: l.name }));
+
   const invalidatePlayers = () => queryClient.invalidateQueries({ queryKey: ["/api/players"] });
   const invalidateChamps  = () => queryClient.invalidateQueries({ queryKey: ["/api/championships"] });
 
   const addPlayer = useMutation({
-    mutationFn: async (d: { name: string; elo?: number }) => (await apiRequest("POST", "/api/players", d)).json(),
+    mutationFn: async (d: { name: string; elo?: number; leagueKey?: string | null }) =>
+      (await apiRequest("POST", "/api/players", d)).json(),
     onSuccess: () => { invalidatePlayers(); toast({ title: "Joueur ajouté" }); },
     onError:   () => toast({ title: "Erreur", description: "Impossible d'ajouter.", variant: "destructive" }),
   });
   const editPlayer = useMutation({
-    mutationFn: async ({ id, name }: { id: string; name: string }) => (await apiRequest("PATCH", `/api/players/${id}`, { name })).json(),
+    mutationFn: async ({ id, name, leagueKey }: { id: string; name: string; leagueKey?: string | null }) =>
+      (await apiRequest("PATCH", `/api/players/${id}`, { name, leagueKey })).json(),
     onSuccess: () => { invalidatePlayers(); toast({ title: "Joueur modifié" }); },
     onError:   () => toast({ title: "Erreur", variant: "destructive" }),
   });
@@ -735,9 +765,9 @@ export default function Home() {
               <StatsCard icon={TrendingUp} label="Elo Moyen"
                 value={players.length > 0 ? Math.round(players.reduce((s, p) => s + p.elo, 0) / players.length) : 0} />
             </div>
-            <EloLeaderboard players={players}
-              onAddPlayer={(name, elo) => addPlayer.mutate({ name, elo })}
-              onEditPlayer={(id, name) => editPlayer.mutate({ id, name })}
+            <EloLeaderboard players={players} leagues={leagueOptions}
+              onAddPlayer={(name, elo, leagueKey) => addPlayer.mutate({ name, elo, leagueKey })}
+              onEditPlayer={(id, name, leagueKey) => editPlayer.mutate({ id, name, leagueKey })}
               onDeletePlayer={(id) => deletePlayer.mutate(id)}
               onResetElo={(id) => resetElo.mutate(id)} />
           </TabsContent>
@@ -749,7 +779,7 @@ export default function Home() {
                 onRename={(id, name) => renameChamp.mutate({ id, name })} />
               <ChampionshipPanel
                 championship={liguePion}
-                eligiblePlayers={getEligiblePlayers(liguePion, allChampionships, players)}
+                eligiblePlayers={getEligiblePlayers(liguePion, players)}
                 allPlayers={players} />
             </TabsContent>
           )}
@@ -761,7 +791,7 @@ export default function Home() {
                 onRename={(id, name) => renameChamp.mutate({ id, name })} />
               <ChampionshipPanel
                 championship={ligueRoi}
-                eligiblePlayers={getEligiblePlayers(ligueRoi, allChampionships, players)}
+                eligiblePlayers={getEligiblePlayers(ligueRoi, players)}
                 allPlayers={players} />
             </TabsContent>
           )}
@@ -773,7 +803,7 @@ export default function Home() {
                 onRename={(id, name) => renameChamp.mutate({ id, name })} />
               <ChampionshipPanel
                 championship={champ}
-                eligiblePlayers={getEligiblePlayers(champ, allChampionships, players)}
+                eligiblePlayers={getEligiblePlayers(champ, players)}
                 allPlayers={players}
                 onDelete={() => deleteChamp.mutate(champ.id)} />
             </TabsContent>

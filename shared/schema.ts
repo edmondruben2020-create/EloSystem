@@ -16,13 +16,15 @@ export const championships = pgTable("championships", {
   key: text("key").unique(), // stable slug — never rename this column
 });
 
-// Players are GLOBAL — not tied to any championship
-// Their Elo is updated by every match regardless of which league it's in
+// Players are GLOBAL — not tied to any championship.
+// leagueKey pins a player to one official league permanently (set at creation).
+// null = unassigned (player won't appear in any league tab).
 export const players = pgTable("players", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   name: text("name").notNull(),
   elo: real("elo").notNull().default(1200),
   gamesPlayed: integer("games_played").notNull().default(0),
+  leagueKey: text("league_key"), // "ligue-pion" | "ligue-roi" | null
 });
 
 // Matches belong to a specific championship/league
@@ -43,7 +45,6 @@ export const matches = pgTable("matches", {
 
 export const insertChampionshipSchema = createInsertSchema(championships).omit({ id: true });
 
-// Players no longer have a championshipId
 export const insertPlayerSchema = createInsertSchema(players).omit({
   id: true,
   gamesPlayed: true,

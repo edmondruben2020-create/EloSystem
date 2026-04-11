@@ -43,7 +43,9 @@ var players = pgTable("players", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   name: text("name").notNull(),
   elo: real("elo").notNull().default(1200),
-  gamesPlayed: integer("games_played").notNull().default(0)
+  gamesPlayed: integer("games_played").notNull().default(0),
+  leagueKey: text("league_key")
+  // "ligue-pion" | "ligue-roi" | null
 });
 var matches = pgTable("matches", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
@@ -221,10 +223,6 @@ function getKFactor(gamesPlayed, elo) {
 function expectedScore(ratingA, ratingB) {
   return 1 / (1 + Math.pow(10, (ratingB - ratingA) / 400));
 }
-var LEAGUE_THRESHOLD = 900;
-function leagueName(elo) {
-  return elo >= LEAGUE_THRESHOLD ? "Ligue Roi" : "Ligue Pion";
-}
 async function registerRoutes(app2) {
   app2.get("/api/championships", async (_req, res) => {
     try {
@@ -303,7 +301,7 @@ async function registerRoutes(app2) {
     try {
       const validated = insertPlayerSchema.parse(req.body);
       const player = await storage.createPlayer(validated);
-      console.log(`[Player] Cr\xE9\xE9: "${player.name}" (Elo initial: ${Math.round(player.elo)}) \u2192 ${leagueName(player.elo)}`);
+      console.log(`[Player] Cr\xE9\xE9: "${player.name}" (Elo: ${Math.round(player.elo)}, Ligue: ${player.leagueKey ?? "aucune"})`);
       res.status(201).json(player);
     } catch (err) {
       if (err?.name === "ZodError") return res.status(400).json({ error: "Invalid player data", details: err.errors });
@@ -313,12 +311,21 @@ async function registerRoutes(app2) {
   });
   app2.patch("/api/players/:id", async (req, res) => {
     try {
-      const { name } = z2.object({ name: z2.string().min(1) }).parse(req.body);
-      const player = await storage.updatePlayer(req.params.id, { name });
+      const data = z2.object({
+        name: z2.string().min(1).optional(),
+        leagueKey: z2.string().nullable().optional()
+      }).parse(req.body);
+      const updates = {};
+      if (data.name !== void 0) updates.name = data.name;
+      if ("leagueKey" in data) updates.leagueKey = data.leagueKey ?? null;
+      if (Object.keys(updates).length === 0) {
+        return res.status(400).json({ error: "Aucun champ \xE0 mettre \xE0 jour." });
+      }
+      const player = await storage.updatePlayer(req.params.id, updates);
       if (!player) return res.status(404).json({ error: "Player not found" });
       res.json(player);
     } catch (err) {
-      if (err?.name === "ZodError") return res.status(400).json({ error: "Nom invalide." });
+      if (err?.name === "ZodError") return res.status(400).json({ error: "Donn\xE9es invalides." });
       console.error("[PATCH /api/players/:id]", err);
       res.status(500).json({ error: "Failed to update player" });
     }
@@ -393,20 +400,6 @@ async function registerRoutes(app2) {
         blackEloAfter,
         blackPlayer.gamesPlayed + 1
       );
-      const whiteOldLeague = leagueName(whitePlayer.elo);
-      const whiteNewLeague = leagueName(whiteEloAfter);
-      const blackOldLeague = leagueName(blackPlayer.elo);
-      const blackNewLeague = leagueName(blackEloAfter);
-      if (whiteOldLeague !== whiteNewLeague) {
-        console.log(
-          `[Ligue Migration] ${whitePlayer.name} : ${whiteOldLeague} \u2192 ${whiteNewLeague} (Elo ${Math.round(whitePlayer.elo)} \u2192 ${Math.round(whiteEloAfter)})`
-        );
-      }
-      if (blackOldLeague !== blackNewLeague) {
-        console.log(
-          `[Ligue Migration] ${blackPlayer.name} : ${blackOldLeague} \u2192 ${blackNewLeague} (Elo ${Math.round(blackPlayer.elo)} \u2192 ${Math.round(blackEloAfter)})`
-        );
-      }
       res.status(201).json(match);
     } catch (err) {
       if (err?.name === "ZodError") return res.status(400).json({ error: "Donn\xE9es de match invalides.", details: err.errors });

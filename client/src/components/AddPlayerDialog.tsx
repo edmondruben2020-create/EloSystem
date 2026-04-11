@@ -11,23 +11,39 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { UserPlus } from "lucide-react";
 
+interface LeagueOption { key: string; name: string; }
+
 interface AddPlayerDialogProps {
-  onAddPlayer: (name: string, initialElo: number) => void;
+  onAddPlayer: (name: string, initialElo: number, leagueKey: string | null) => void;
+  leagues?: LeagueOption[];
 }
 
-export default function AddPlayerDialog({ onAddPlayer }: AddPlayerDialogProps) {
+export default function AddPlayerDialog({ onAddPlayer, leagues = [] }: AddPlayerDialogProps) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [initialElo, setInitialElo] = useState("1200");
+  const [leagueKey, setLeagueKey] = useState<string>("__none__");
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (name.trim()) {
-      onAddPlayer(name.trim(), parseInt(initialElo) || 1200);
+      onAddPlayer(
+        name.trim(),
+        parseInt(initialElo) || 1200,
+        leagueKey === "__none__" ? null : leagueKey,
+      );
       setName("");
       setInitialElo("1200");
+      setLeagueKey("__none__");
       setOpen(false);
     }
   };
@@ -45,7 +61,7 @@ export default function AddPlayerDialog({ onAddPlayer }: AddPlayerDialogProps) {
           <DialogHeader>
             <DialogTitle>Ajouter un Nouveau Joueur</DialogTitle>
             <DialogDescription>
-              Créez un nouveau joueur avec son classement Elo initial (par défaut 1200).
+              Créez un joueur et affectez-le à sa ligue. Cette affectation peut être modifiée ensuite.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
@@ -61,7 +77,7 @@ export default function AddPlayerDialog({ onAddPlayer }: AddPlayerDialogProps) {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="initial-elo">Elo initial (optionnel)</Label>
+              <Label htmlFor="initial-elo">Elo initial</Label>
               <Input
                 id="initial-elo"
                 data-testid="input-initial-elo"
@@ -73,6 +89,22 @@ export default function AddPlayerDialog({ onAddPlayer }: AddPlayerDialogProps) {
                 max="3000"
               />
             </div>
+            {leagues.length > 0 && (
+              <div className="space-y-2">
+                <Label htmlFor="league-select">Ligue</Label>
+                <Select value={leagueKey} onValueChange={setLeagueKey}>
+                  <SelectTrigger id="league-select" data-testid="select-player-league">
+                    <SelectValue placeholder="Sélectionner une ligue" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__none__">Aucune affectation</SelectItem>
+                    {leagues.map((l) => (
+                      <SelectItem key={l.key} value={l.key}>{l.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
           </div>
           <DialogFooter>
             <Button type="submit" data-testid="button-submit-player">

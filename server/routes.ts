@@ -16,13 +16,6 @@ function expectedScore(ratingA: number, ratingB: number): number {
   return 1 / (1 + Math.pow(10, (ratingB - ratingA) / 400));
 }
 
-/** Threshold that separates Ligue Pion (< 900) from Ligue Roi (≥ 900). */
-const LEAGUE_THRESHOLD = 900;
-
-function leagueName(elo: number): string {
-  return elo >= LEAGUE_THRESHOLD ? "Ligue Roi" : "Ligue Pion";
-}
-
 // ── Routes ────────────────────────────────────────────────────────────────────
 
 export async function registerRoutes(app: Express): Promise<Server> {
@@ -120,7 +113,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const validated = insertPlayerSchema.parse(req.body);
       const player = await storage.createPlayer(validated);
-      console.log(`[Player] Créé: "${player.name}" (Elo initial: ${Math.round(player.elo)}) → ${leagueName(player.elo)}`);
+      console.log(`[Player] Créé: "${player.name}" (Elo: ${Math.round(player.elo)}, Ligue: ${player.leagueKey ?? "aucune"})`);
       res.status(201).json(player);
     } catch (err: any) {
       if (err?.name === "ZodError") return res.status(400).json({ error: "Invalid player data", details: err.errors });
@@ -129,14 +122,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Accepts { name?, leagueKey? } — either or both can be updated independently
   app.patch("/api/players/:id", async (req, res) => {
     try {
-      const { name } = z.object({ name: z.string().min(1) }).parse(req.body);
-      const player = await storage.updatePlayer(req.params.id, { name });
+      const data = z.object({
+        name:      z.string().min(1).optional(),
+        leagueKey: z.string().nullable().optional(),
+      }).parse(req.body);
+
+      const updates: Record<string, unknown> = {};
+      if (data.name      !== undefined) updates.name      = data.name;
+      if ("leagueKey" in data)          updates.leagueKey = data.leagueKey ?? null;
+
+      if (Object.keys(updates).length === 0) {
+        return res.status(400).json({ error: "Aucun champ à mettre à jour." });
+      }
+
+      const player = await storage.updatePlayer(req.params.id, updates as any);
       if (!player) return res.status(404).json({ error: "Player not found" });
       res.json(player);
     } catch (err: any) {
-      if (err?.name === "ZodError") return res.status(400).json({ error: "Nom invalide." });
+      if (err?.name === "ZodError") return res.status(400).json({ error: "Données invalides." });
       console.error("[PATCH /api/players/:id]", err);
       res.status(500).json({ error: "Failed to update player" });
     }
@@ -225,25 +231,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
         blackEloAfter,
         blackPlayer.gamesPlayed + 1,
       );
-
-      // Log league migrations (display-side auto-filter crosses 900)
-      const whiteOldLeague = leagueName(whitePlayer.elo);
-      const whiteNewLeague = leagueName(whiteEloAfter);
-      const blackOldLeague = leagueName(blackPlayer.elo);
-      const blackNewLeague = leagueName(blackEloAfter);
-
-      if (whiteOldLeague !== whiteNewLeague) {
-        console.log(
-          `[Ligue Migration] ${whitePlayer.name} : ${whiteOldLeague} → ${whiteNewLeague}` +
-          ` (Elo ${Math.round(whitePlayer.elo)} → ${Math.round(whiteEloAfter)})`,
-        );
-      }
-      if (blackOldLeague !== blackNewLeague) {
-        console.log(
-          `[Ligue Migration] ${blackPlayer.name} : ${blackOldLeague} → ${blackNewLeague}` +
-          ` (Elo ${Math.round(blackPlayer.elo)} → ${Math.round(blackEloAfter)})`,
-        );
-      }
 
       res.status(201).json(match);
     } catch (err: any) {
